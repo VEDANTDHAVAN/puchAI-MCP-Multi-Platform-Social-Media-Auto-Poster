@@ -2,6 +2,7 @@
 import asyncio
 from typing import Annotated
 import os
+import requests
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.bearer import BearerAuthProvider, RSAKeyPair
@@ -120,7 +121,7 @@ class Fetch:
 
 # --- MCP Server Setup ---
 mcp = FastMCP(
-    "Job Finder MCP Server",
+    "Multi-Platform Social Media Auto-Poster MCP Server",
     auth=SimpleBearerAuthProvider(TOKEN),
 )
 
@@ -129,85 +130,78 @@ mcp = FastMCP(
 async def validate() -> str:
     return MY_NUMBER
 
-# --- Tool: job_finder (now smart!) ---
-JobFinderDescription = RichToolDescription(
-    description="Smart job tool: analyze descriptions, fetch URLs, or search jobs based on free text.",
-    use_when="Use this to evaluate job descriptions or search for jobs using freeform goals.",
-    side_effects="Returns insights, fetched job descriptions, or relevant job links.",
+# --- Tool: social_media_poster (now smart!) ---
+# LinkedIn post creation and publishing
+# Tool Description
+LINKEDIN_POST_DESCRIPTION = RichToolDescription(
+    description="Create a LinkedIn post with optional images.",
+    use_when="Use this when the user wants to post an update on LinkedIn, either text-only or with an image.",
+    side_effects="Publishes a post to the authenticated LinkedIn account, optionally including uploaded images."
 )
 
-@mcp.tool(description=JobFinderDescription.model_dump_json())
-async def job_finder(
-    user_goal: Annotated[str, Field(description="The user's goal (can be a description, intent, or freeform query)")],
-    job_description: Annotated[str | None, Field(description="Full job description text, if available.")] = None,
-    job_url: Annotated[AnyUrl | None, Field(description="A URL to fetch a job description from.")] = None,
-    raw: Annotated[bool, Field(description="Return raw HTML content if True")] = False,
-) -> str:
+@mcp.tool(description=LINKEDIN_POST_DESCRIPTION.model_dump_json())
+async def post_to_linkedin(post_text: str) -> str:
     """
-    Handles multiple job discovery methods: direct description, URL fetch, or freeform search query.
+    Create a text-only post on LinkedIn using the authenticated user's account.
     """
-    if job_description:
-        return (
-            f"📝 **Job Description Analysis**\n\n"
-            f"---\n{job_description.strip()}\n---\n\n"
-            f"User Goal: **{user_goal}**\n\n"
-            f"💡 Suggestions:\n- Tailor your resume.\n- Evaluate skill match.\n- Consider applying if relevant."
-        )
+    import os
+    access_token = os.environ.get("LINKEDIN_ACCESS_TOKEN")
+    if not access_token:
+        return {"error": "Missing LinkedIn access token. Set LINKEDIN_ACCESS_TOKEN env variable."}
+        
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "X-Restli-Protocol-Version": "2.0.0"
+    }
 
-    if job_url:
-        content, _ = await Fetch.fetch_url(str(job_url), Fetch.USER_AGENT, force_raw=raw)
-        return (
-            f"🔗 **Fetched Job Posting from URL**: {job_url}\n\n"
-            f"---\n{content.strip()}\n---\n\n"
-            f"User Goal: **{user_goal}**"
-        )
+    # Step 1: Get user URN
+    profile_res = requests.get(
+        "https://api.linkedin.com/v2/me",
+        headers=headers
+    )
+        
+    if profile_res.status_code != 200:
+        return f"Failed to fetch profile: {profile_res.text}"
+    
+    user_urn = profile_res.json().get("id")
+    author_urn = f"urn:li:person:{user_urn}"
+    if not user_urn:
+        return {"error": "Could not retrieve LinkedIn user URN"}
+        
+    # Step 2: Text-only post
+    post_payload = {
+        "author": author_urn,
+        "lifecycleState": "PUBLISHED",
+        "specificContent": {
+            "com.linkedin.ugc.ShareContent": {
+                "shareCommentary": {
+                    "text": post_text
+                },
+                "shareMediaCategory": "NONE"
+            }
+        },
+        "visibility": {
+            "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+        }
+    }
 
-    if "look for" in user_goal.lower() or "find" in user_goal.lower():
-        links = await Fetch.google_search_links(user_goal)
-        return (
-            f"🔍 **Search Results for**: _{user_goal}_\n\n" +
-            "\n".join(f"- {link}" for link in links)
-        )
+    # Step 3: Post to LinkedIn
+    post_res = requests.post(
+        "https://api.linkedin.com/v2/ugcPosts",
+        headers=headers,
+        json=post_payload
+    )
+        
+    if post_res.status_code != 201:
+        return {"error": f"Failed to post on LinkedIn: {post_res.text}"}
 
-    raise McpError(ErrorData(code=INVALID_PARAMS, message="Please provide either a job description, a job URL, or a search query in user_goal."))
-
-
-# Image inputs and sending images
-
-MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION = RichToolDescription(
-    description="Convert an image to black and white and save it.",
-    use_when="Use this tool when the user provides an image URL and requests it to be converted to black and white.",
-    side_effects="The image will be processed and saved in a black and white format.",
-)
-
-@mcp.tool(description=MAKE_IMG_BLACK_AND_WHITE_DESCRIPTION.model_dump_json())
-async def make_img_black_and_white(
-    puch_image_data: Annotated[str, Field(description="Base64-encoded image data to convert to black and white")] = None,
-) -> list[TextContent | ImageContent]:
-    import base64
-    import io
-
-    from PIL import Image
-
-    try:
-        image_bytes = base64.b64decode(puch_image_data)
-        image = Image.open(io.BytesIO(image_bytes))
-
-        bw_image = image.convert("L")
-
-        buf = io.BytesIO()
-        bw_image.save(buf, format="PNG")
-        bw_bytes = buf.getvalue()
-        bw_base64 = base64.b64encode(bw_bytes).decode("utf-8")
-
-        return [ImageContent(type="image", mimeType="image/png", data=bw_base64)]
-    except Exception as e:
-        raise McpError(ErrorData(code=INTERNAL_ERROR, message=str(e)))
-
+    return [TextContent(type="text", text="✅ LinkedIn post published successfully!")]
+     
 # --- Run MCP Server ---
 async def main():
-    print("🚀 Starting MCP server on http://0.0.0.0:8086")
-    await mcp.run_async("streamable-http", host="0.0.0.0", port=8086)
+    print("🚀 Starting MCP server on http://0.0.0.0:8085")
+    await mcp.run_async("streamable-http", host="0.0.0.0", port=8085)
 
 if __name__ == "__main__":
     asyncio.run(main())

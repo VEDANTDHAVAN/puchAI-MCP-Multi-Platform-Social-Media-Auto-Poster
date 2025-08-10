@@ -1,6 +1,6 @@
 # This server shows how you can use the unique identifier for users sent by puch in every tool call.
 # This server is a task management mcp server where you can manage tasks for a user, using `puch_user_id` as a unique identifier for that user.
-
+# type: ignore
 import asyncio
 from typing import Annotated, Optional, Literal
 import os, uuid, json
